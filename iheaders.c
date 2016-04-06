@@ -72,9 +72,6 @@ static const char* help_opts =
     "-r, --root-dir=PATH\1when accompanied by the 'header-dir' option, this will place\2"
     "headers into the header directory with the same folder\2"
     "structure as their corresponding source files.\n"
-    "-R, --root-dir-recursive=PATH\1same as the above option, with the additional effect of\2"
-    "recursively processing files from the source directory\2"
-    "rather than the files listed.\n"
     "-s, --single-output=PATH\1provide a file header path for all the provided sources\n"
     "-O, --stdout\1pipe the resulting header into stdout instead.\n"
     "-T, --timestamp-mode\1place timestamps in the generated headers and only re-generate\2"
@@ -86,12 +83,12 @@ static const char* help_opts =
 
 static const char* help_footer = "\n" /* padding from the option list */
     "There are three modes in which you can organize headers generation: directory mode\n"
-    "('-R', '-r', and '-D' options) - which will organize headers for each source into a\n"
-    "set of headers, single-header mode ('-s' option) - which will combine all sources into\n"
+    "('-r', and '-D' options) - which will organize headers for each source into a set\n"
+    "of headers, single-header mode ('-s' option) - which will combine all sources into\n"
     "a single header, and pipe mode ('-O' option) - similar to single-header mode, except\n"
     "the resulting file is piped to stdout.\n\n";
 
-static const char* opt_str = "hvps:t:d:r:I:R:OT";
+static const char* opt_str = "hvps:t:d:r:I:OT";
 
 static struct option p_opts[] = {
     {"help", no_argument, 0, 'h'},
@@ -100,7 +97,6 @@ static struct option p_opts[] = {
     {"token", required_argument, 0, 't'},
     {"header-dir", required_argument, 0, 'd'},
     {"root-dir", required_argument, 0, 'r'},
-    {"root-dir-recursive", required_argument, 0, 'R'},
     {"timestamp-mode", no_argument, 0, 'T'},
     {"single-output", required_argument, 0, 's'},
     {"tab-indent", required_argument, 0, 'I'},
@@ -122,7 +118,6 @@ static bool handle_target_set(char** set, size_t nset);
 static bool help_mode = false,  /* if true, the help will be displayed and iheaders will exit */
     verbose_mode = false,       /* if true, extra information will be displayed during processing */
     pipe_mode = false,          /* pipe the output will be piped to stdout */
-    recursive_mode = false,     /* recursively search for files in root_dir */
     timestamp_mode = false,     /* place timestamps in generated header files */
     merge_mode = false,         /* merge the results into one header */
     strip_mode = false;         /* strip mode, instead of extracting header code */
@@ -166,8 +161,6 @@ int main(int argc, char** argv) {
         case 'd':
             header_dir = optarg;
             break;
-        case 'R':
-            recursive_mode = true;
         case 'r':
             root_dir = optarg;
             break;
@@ -197,7 +190,7 @@ int main(int argc, char** argv) {
     /* if two or more modes are enabled, complain and then exit. */
     if (ANY_TWO(single_target != NULL, (header_dir != NULL || root_dir != NULL), pipe_mode)) {
         fprintf(stderr, "error: the pipe mode ('-O' option), directory mode "
-                "('-r', '-R', and '-d' options), and single-header mode ('-s' option) "
+                "('-r', and '-d' options), and single-header mode ('-s' option) "
                 "cannot be used together.\n");
         exit(EXIT_FAILURE);
     }
@@ -223,11 +216,11 @@ int main(int argc, char** argv) {
     
     if (verbose_mode) {
         printf("options (%d) -> help_mode=%s, verbose_mode=%s, pipe_mode=%s, "
-               "token=%s, header_dir=%s, root_dir=%s, recursive_mode=%s, "
-               "merge_mode=%s\n",
+               "token=%s, header_dir=%s, root_dir=%s, merge_mode=%s, "
+               "strip_mode=%s\n",
                n, BSTR(help_mode), BSTR(verbose_mode), BSTR(pipe_mode),
-               token, NSTR(header_dir), NSTR(root_dir),
-               BSTR(recursive_mode), BSTR(merge_mode));
+               token, NSTR(header_dir), NSTR(root_dir), BSTR(merge_mode),
+               BSTR(strip_mode));
     }
 
     /* display help */
@@ -254,7 +247,7 @@ int main(int argc, char** argv) {
     }
 
     /* select target files from arguments normally and process them */
-    if (!merge_mode && !recursive_mode) {
+    if (!merge_mode) {
         size_t t;
         for (t = optind; t < argc; t++) {
             if (strlen(argv[t]) > 0 && argv[t][0] != '-') {
@@ -268,23 +261,10 @@ int main(int argc, char** argv) {
             }
         }
     }
-    /* select all target files from the root source directory */
-    else if (recursive_mode) {
-
-        /* collect files */
-
-        /* merge all the collected files into one header */
-        if (merge_mode) {
-            
-        }
-        /* process the files individually, using process_target */
-        else {
-            
-        }
-    }
     /* select all target files to be merged into a single header */
-    else if (merge_mode) {
+    else {
         if (!handle_target_set(&argv[optind], argc - optind)) {
+            fprintf(stderr, "error while processing target set, exiting.\n");
             exit(EXIT_FAILURE);
         }
     }
@@ -879,30 +859,39 @@ static bool handle_extension(char* source, char* dest) {
 #define REALPATH_CHECK(V) ERRNO_CHECK("error when resolving path", V)
 
 static bool handle_target_set(char** set, size_t nset) {
+
+    FILE* target = NULL;
+    bool close_after = true;
+
+    if (pipe_mode) {
+        target = stdout;
+        close_after = false;
+    }
+    else {
+        target = fopen(single_target, "r");
+        FOPEN_CHECK(single_target);
+    }
     
     size_t t;
     for (t = 0; t < nset; ++t) {
 
         if (verbose_mode) {
-            printf("Handling target from set: %s, idx: %d\n", set[t], (int) t);
+            printf("handling target from set: %s, idx: %d\n", set[t], (int) t);
         }
         
         FILE* fsource = fopen(set[t], "r");
         FOPEN_CHECK(set[t]);
 
-        bool ret;
-
-        if (pipe_mode) {
-            ret = parse(fsource, stdout, strip_mode);
-            puts("\n");
-        }
-        //TODO: handle other cases
+        bool ret = parse(fsource, target, strip_mode);
+        fputc('\n', target);
         
         fclose(fsource);
         if (!ret) break;
     }
-    // finish
-    return false;
+    if (close_after) {
+        fclose(target);
+    }
+    return true;
 }
 
 static bool handle_target(char* buf) {

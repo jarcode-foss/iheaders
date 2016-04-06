@@ -51,7 +51,7 @@ You can also expose an entire block to the header if the `@` token is immediatel
 
 (see `iheaders --help` for a full list of options)
 
-This program has three output modes, pipe (`-O` option), directory (`-r`, `-R`, and `-d` options), and single-header mode (`-s` option).
+This program has three output modes, pipe (`-O` option), directory (`-r` and `-d` options), and single-header mode (`-s` option).
 
 **pipe mode**: will pipe the output of all the input files into stdout. This is useful for when you are stripping header syntax for compilation, and want to pipe the sources straight into a compiler.
 
