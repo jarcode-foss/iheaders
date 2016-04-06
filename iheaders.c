@@ -64,6 +64,8 @@ static const char* help_desc =
 /* '\1' defines the start of the description, '\2' indicates a new indented line. */
 static const char* help_opts =
     "-h, --help\1show this help and exit\n"
+    "-p, --strip\1strip header information from the source files, producing C sources\2"
+    "that can be compiled.\n"
     "-v, --verbose\1show detailed information about inline header processing\n"
     "-t, --token=WORD\1sets the token for the processing rules to the specified string\n"
     "-d, --header-dir=PATH\1defines the directory for headers to be placed into\n"
@@ -89,10 +91,11 @@ static const char* help_footer = "\n" /* padding from the option list */
     "a single header, and pipe mode ('-O' option) - similar to single-header mode, except\n"
     "the resulting file is piped to stdout.\n\n";
 
-static const char* opt_str = "hvs:t:d:r:I:R:OT";
+static const char* opt_str = "hvps:t:d:r:I:R:OT";
 
 static struct option p_opts[] = {
     {"help", no_argument, 0, 'h'},
+    {"strip", no_argument, 0, 'p'},
     {"verbose", no_argument, 0, 'v'},
     {"token", required_argument, 0, 't'},
     {"header-dir", required_argument, 0, 'd'},
@@ -112,9 +115,7 @@ static char* indent_opts(size_t total_size, size_t max_size, char* buf);
 
 static bool handle_target(char* buf);
 static bool handle_open(char* source, char* dest);
-static bool process(FILE* source, FILE* dest);
-
-static bool strip(FILE* source, FILE* dest);
+static bool parse(FILE* source, FILE* dest, bool strip);
 
 static bool handle_target_set(char** set, size_t nset);
 
@@ -123,9 +124,10 @@ static bool help_mode = false,  /* if true, the help will be displayed and ihead
     pipe_mode = false,          /* pipe the output will be piped to stdout */
     recursive_mode = false,     /* recursively search for files in root_dir */
     timestamp_mode = false,     /* place timestamps in generated header files */
-    merge_mode = false;         /* merge the results into one header */
+    merge_mode = false,         /* merge the results into one header */
+    strip_mode = false;         /* strip mode, instead of extracting header code */
 
-static const char *token = "@", /* token to use in processing */
+static const char* token = "@", /* token to use in processing */
     * header_dir = NULL,        /* output header directory */
     * root_dir = NULL,          /* root source directory */
     * single_target = NULL;     /* single output header file */
@@ -154,6 +156,9 @@ int main(int argc, char** argv) {
         switch (c) {
         case 'v':
             verbose_mode = true;
+            break;
+        case 'p':
+            strip_mode = true;
             break;
         case 't':
             token = optarg;
@@ -218,9 +223,11 @@ int main(int argc, char** argv) {
     
     if (verbose_mode) {
         printf("options (%d) -> help_mode=%s, verbose_mode=%s, pipe_mode=%s, "
-               "token=%s, header_dir=%s, root_dir=%s\n",
+               "token=%s, header_dir=%s, root_dir=%s, recursive_mode=%s, "
+               "merge_mode=%s\n",
                n, BSTR(help_mode), BSTR(verbose_mode), BSTR(pipe_mode),
-               token, NSTR(header_dir), NSTR(root_dir));
+               token, NSTR(header_dir), NSTR(root_dir),
+               BSTR(recursive_mode), BSTR(merge_mode));
     }
 
     /* display help */
@@ -246,7 +253,7 @@ int main(int argc, char** argv) {
         exit(EXIT_SUCCESS);
     }
 
-    /* select target files from arguments following the options */
+    /* select target files from arguments normally and process them */
     if (!merge_mode && !recursive_mode) {
         size_t t;
         for (t = optind; t < argc; t++) {
@@ -261,13 +268,25 @@ int main(int argc, char** argv) {
             }
         }
     }
-    /* select all target files to be merged into a single header */
-    else if (!merge_mode) {
-        handle_target_set(&argv[optind], argc - optind);
-    }
     /* select all target files from the root source directory */
-    else {
-        //TODO: finish
+    else if (recursive_mode) {
+
+        /* collect files */
+
+        /* merge all the collected files into one header */
+        if (merge_mode) {
+            
+        }
+        /* process the files individually, using process_target */
+        else {
+            
+        }
+    }
+    /* select all target files to be merged into a single header */
+    else if (merge_mode) {
+        if (!handle_target_set(&argv[optind], argc - optind)) {
+            exit(EXIT_FAILURE);
+        }
     }
 }
 
@@ -286,7 +305,19 @@ static void check_stream(FILE* stream) {
         readlink(pbuf, fbuf, PATH_MAX);
         ERRNO_CHECK("error while reading from stream", fbuf);
     }
-} 
+}
+
+static void get_file_desc(FILE* stream, char* fbuf) {
+    int fd = fileno(stream);
+    if (fd == -1) {
+        memcpy(fbuf, "<invalid>", 9 * sizeof(char));
+        return;
+    }
+    char pbuf[PATH_MAX];
+    snprintf(pbuf, PATH_MAX, "/proc/self/fd/%d", fd);
+    readlink(pbuf, fbuf, PATH_MAX);
+    ERRNO_CHECK("error while reading from stream", fbuf);
+}
 
 #define PARSE_UNKNOWN 0
 #define PARSE_HEADER_PREFIX 1
@@ -295,22 +326,34 @@ static void check_stream(FILE* stream) {
 #define PARSE_MEMBER 4
 
 /* local to process and strip functions */
-#define PARSE_ERR(V, ...) fprintf(stderr, "syntax error [%d:%d] - " V, line, col, ##__VA_ARGS__)
+#define PARSE_ERR(V, ...) fprintf(stderr, "syntax error [%d:%d] - " V "\n", line, col, ##__VA_ARGS__)
+#define PARSE_INFO(V, ...)                                          \
+    do {                                                            \
+        if (verbose_mode) {                                         \
+            printf("[PARSE][%d:%d] " V "\n", line, col, ##__VA_ARGS__);  \
+        }                                                           \
+    } while (false)
 
 /* GCC punishes my monolithic parsing functions by complaining about
-   potentially uninitialized variables. This fixes that.  */
+   potentially uninitialized variables. This fixes that. */
 #if GCC_VERSION_COMPARE(4, 6, 4)
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 #endif
 
-/* process the given source file stream, and pipe the stripped source file into 'dest' */
-static bool strip(FILE* source, FILE* dest) {
-    //TODO: finish
-    return false;
-}
-
 /* process the given source file stream, and pipe the resulting header information into 'dest' */
-static bool process(FILE* source, FILE* dest) {
+static bool parse(FILE* source, FILE* dest, bool strip) {
+
+    /*
+      If you can follow the control flow of this function, you are lying.
+     */
+
+    if (verbose_mode) {
+        char dest_buf[PATH_MAX];
+        char source_buf[PATH_MAX];
+        get_file_desc(dest, dest_buf);
+        get_file_desc(source, source_buf);
+        printf("[PARSE] starting parse for %s -> %s\n", source_buf, dest_buf);
+    }
     
     char buf[128];          /* input buffer */
     bool line_start = true, /* while searching for a token, this is set to true if the index
@@ -320,48 +363,57 @@ static bool process(FILE* source, FILE* dest) {
         b_a;                /* multi-purpose flag */
     size_t t,               /* index in 'buf' */
         token_size = strlen(token),
-        a, b, c;            /* multi-purpose variables (usually indexes) used while parsing */
+        a, b, c;               /* multi-purpose variables (usually indexes) used while parsing */
     
     uint8_t parse_mode_flag = 0;   /* while parsing a token, this is set to the parse state */
-    char m_buf[256];               /* multi-purpose buffer */
+    char m_buf[512];               /* multi-purpose buffer */
     char* ma_buf = NULL;           /* multi-purpose allocated buffer, used to store header blocks */
     size_t ma_size = 0;
-    char set_prefix_buf[128];      /* the universal prefix for this source file */
+    char set_prefix_buf[128];      /* the universal header prefix for this source file */
+    char set_source_buf[128];      /* the universal source prefix for this source file */
     char prefix_buf[128];          /* prefix set for a specific member */
+    char source_buf[128];
     set_prefix_buf[0] = '\0';
+    set_source_buf[0] = '\0';
     char* prefix = set_prefix_buf; /* pointer to which prefix buffer to use for a token */
+    char* sprefix = set_source_buf; /* pointer to which source prefix buffer to use */
+
+    bool copying = true, skip_char = false;
     
     int line = 1, col = 1;
+    size_t read_chars, token_read_idx = 0;
     while (!feof(source)) {
-        fread(buf, sizeof(char), 128, source);
+        read_chars = fread(buf, sizeof(char), 128, source);
         check_stream(source);
         
-        for (t = 0; t < 128; t++) {
+        for (t = 0; t < read_chars; ++t) {
             
             /* keep track of line number and characters regardless of parsing state */
             if (buf[t] == '\n') {
-                col = 1;
+                col = 0;
                 ++line;
             }
             else ++col;
             
             /* looking for a new token */
             if (!parse_mode) {
-                /* if at the start of a line, and there's enough space for a token, check for a token */
-                if (line_start && 128 - t >= token_size) {
-                    if (strncmp(&buf[t], token, token_size) == 0) {
+                /* if at the start of a line, or currently comparing a token, compare characters */
+                if (line_start || token_read_idx > 0) {
+                    if (buf[t] == token[token_read_idx]) {
+                        ++token_read_idx;
+                        copying = false;
+                    }
+                    else {
+                        token_read_idx = 0;
+                        copying = true;
+                    }
+                    
+                    if (token_read_idx == token_size) {
+                        PARSE_INFO("parsing token");
                         parse_mode = true;
                         parse_mode_flag = PARSE_UNKNOWN;
-                        t += token_size - 1;
                     }
                 }
-
-                /* if the character is a newline, mark the next read index as the first in a new line */
-                if (buf[t] != '\n') {
-                    line_start = true;
-                }
-                /* otherwise, just indicate that the next character is not the first in a line */
-                else line_start = false;
             }
             /* currently parsing after a token */
             else {
@@ -369,8 +421,8 @@ static bool process(FILE* source, FILE* dest) {
                 case PARSE_UNKNOWN: /* unknown state, expecting a block, prefix, suffix, or member */
                     switch (buf[t]) {
                     case '{':
+                        PARSE_INFO("starting header block");
                         parse_mode_flag = PARSE_BLOCK;
-                        a = t + 1; /* start of block contents */
                         b = 0;     /* indentation level starts at 0 */
                         c = 0;     /* index for ma_buf */
                         /* allocate ma_buf */
@@ -382,16 +434,23 @@ static bool process(FILE* source, FILE* dest) {
                         /* flag that no characters have yet followed the '{' */
                         b_a = false;
                         break;
+                    case '(':
+                        /* set 'a' to 1, used for tracking paren levels (...) */
+                        a = 1;
+                        goto pre;
                     case '[':
+                        /* set 'a' to 0, we don't track levels for square brackets */
+                        a = 0;
+                    pre:
                         if (prefix_set) {
+                            PARSE_INFO("reading source prefix");
                             parse_mode_flag = PARSE_SOURCE_PREFIX;
                         }
                         else {
+                            PARSE_INFO("reading header prefix");
                             parse_mode_flag = PARSE_HEADER_PREFIX;
                             prefix_set = true;
                         }
-                        /* set 'a' to the index of the first character in the set of brackets */
-                        a = t + 1;
                         /* set 'b' to 0, used to index m_buf */
                         b = 0;
                         break;
@@ -399,10 +458,13 @@ static bool process(FILE* source, FILE* dest) {
                     case ' ':
                         break; /* ignore spacing and tabbing after token */
                     case '=':
-                    case ';':
-                        /* these usually determine the end of a member declaration, we
-                           shouldn't be seeing these at this point. */
-                        PARSE_ERR("expected '{', '[', or start of member after '%s' token", token);
+                    case ';':/* these usually determine the end of a member declaration, we
+                                shouldn't be seeing these at this point. */
+                    case ')':
+                    case ']':
+                    case '}': /* unexpected closing token, shouldn't be here. */
+                        
+                        PARSE_ERR("expected '{', '[', '(', or start of member after '%s' token", token);
                         return false;
                     case '\n':
                         if (!prefix_set) {
@@ -411,44 +473,83 @@ static bool process(FILE* source, FILE* dest) {
                             break;
                         }
                         else {
+                            PARSE_INFO("setting global header and source prefixes");
                             /* token followed by prefix/suffix setting(s), set permenently. */
                             memcpy(set_prefix_buf, prefix_buf, 128);
+                            memcpy(set_source_buf, source_buf, 128);
                             parse_mode = false;
                         }
+                        break;
                     default:
                         /* when we hit any other character, we assume it's the start of a member */
-
-                        /* set 'a' to the index of this character */
-                        a = t;
-                        /* set 'b' to 1, used to index m_buf (0 is the current character) */
-                        b = 1;
-                        /* copy over the first character */
-                        m_buf[0] = buf[t];
+                        if (!strip) {
+                            /* set 'b' to 1, used to index m_buf (0 is the current character) */
+                            b = 1;
+                            /* copy over the first character */
+                            m_buf[0] = buf[t];
                         
-                        parse_mode_flag = PARSE_MEMBER;
+                            parse_mode_flag = PARSE_MEMBER;
+                        }
+                        else { /* we don't need to read into the declaration to strip it */
+                            
+                            /* write source prefix */
+                            if (sprefix != NULL && *sprefix != '\0') {
+                                fputs(sprefix, dest);
+                                fputc(' ', dest);
+                            }
+                            parse_mode = false;
+                        }
                     }
                     break;
-                case PARSE_SOURCE_PREFIX: /* parsing @[][...] data, ignores contents */
+                case PARSE_SOURCE_PREFIX: /* parsing @[][...] data */
                 case PARSE_HEADER_PREFIX: /* parsing @[...][] data */
+                                          /* can be @(...)(...)    */
                     switch (buf[t]) {
+                    case ')':
+                        /* closing paren */
+                        if (a == 1) {
+                            goto end_pre;
+                        }
+                        /* if not 0 (to not track levels), deincrement and copy */
+                        else if (a > 0) {
+                            a--;
+                            goto copy_pre;
+                        }
                     case ']':
+                        /* closing square bracket during (...), just copy */
+                        if (a > 0) {
+                            goto copy_pre;
+                        }
+                    end_pre:
                         /* end of prefix, copy if it was the first set (header prefix) */
                         if (parse_mode_flag == PARSE_HEADER_PREFIX) {
-                            /* empty brackets */
-                            if (a == t) {
-                                prefix_buf[0] = '\0';
-                            }
                             /* copy contents to buffer */
-                            else {
-                                memcpy(prefix_buf, m_buf, b);
-                                prefix_buf[b] = '\0';
-                            }
+                            memcpy(prefix_buf, m_buf, b);
+                            prefix_buf[b] = '\0';
                             /* set prefix to the per-token buffers */
                             prefix = prefix_buf;
+                            PARSE_INFO("copied header prefix '%s'", prefix_buf);
+                        }
+                        else {
+                            memcpy(source_buf, m_buf, b);
+                            source_buf[b] = '\0';
+                            sprefix = source_buf;
+                            PARSE_INFO("copied source prefix '%s'", source_buf);
                         }
                         parse_mode_flag = PARSE_UNKNOWN;
                         break;
+                    case '(':
+                        /* if parsing (...), track levels */
+                        if (a > 0) {
+                            ++a;
+                        }
+                        /* copy regardless */
+                        goto copy_pre;
                     case '[':
+                        /* opening square bracket during (...), copy */
+                        if (a > 0) {
+                            goto copy_pre;
+                        }
                         /* unexpected start of square brackets */
                         PARSE_ERR("unexpected '[' while parsing prefixes");
                         return false;
@@ -457,17 +558,15 @@ static bool process(FILE* source, FILE* dest) {
                         PARSE_ERR("unexpected newline while parsing prefixes");
                         return false;
                     default:
-                        /* copy if header prefix */
-                        if (parse_mode_flag == PARSE_HEADER_PREFIX) {
-                            /* detect overflow (one less, since we need a null-terminating character) */
-                            if (b == 254) {
-                                PARSE_ERR("prefixes content too large [max: 254 characters]");
-                                return false;
-                            }
-                            /* copy character to m_buf */
-                            m_buf[b] = buf[t];
-                            ++b;
+                    copy_pre:
+                        /* detect overflow (one less, since we need a null-terminating character) */
+                        if (b == 126) {
+                            PARSE_ERR("prefix's content too large [max: 126 characters]");
+                            return false;
                         }
+                        /* copy character to m_buf */
+                        m_buf[b] = buf[t];
+                        ++b;
                     }
                     break;
                 case PARSE_BLOCK: /* parsing @ { ... } block */
@@ -477,10 +576,28 @@ static bool process(FILE* source, FILE* dest) {
                         ++b;
                         /* flag that character has followed the first '{' */
                         b_a = true;
-                        break;
+                        goto cpy_char;
                     case '}':
                         /* closing indentation, end of block -- write everything to the header */
                         if (b == 0) {
+                            
+                            PARSE_INFO("end of header block");
+
+                            /* if we're stripping, just ignore the entire block */
+                            if (strip) {
+
+                                /* copy newlines from the block, to keep spacing */
+                                size_t idx;
+                                for (idx = 0; idx < c; ++idx) {
+                                    if (ma_buf[idx] == '\n') {
+                                        fputc('\n', dest);
+                                    }
+                                }
+                                parse_mode = false;
+                                skip_char = true; /* skip the final } character */
+                                break;
+                            }
+                            
                             /* find the lowest amount of indentation that precedes a line */
                             size_t least_num_spaces = 0, idx;
                             if (indent_tab_size > 0) {
@@ -525,7 +642,7 @@ static bool process(FILE* source, FILE* dest) {
                                     indent_off = 0;
                                     line_start = idx;
                                     /* parse through line, counting tabs and spaces */
-                                    while (ma_buf[idx] != '\n') {
+                                    while (ma_buf[idx] != '\n' && ma_buf[idx] != '\0') {
                                         if (indent_off < least_num_spaces) {
                                             switch (ma_buf[idx]) {
                                             case ' ':
@@ -545,6 +662,7 @@ static bool process(FILE* source, FILE* dest) {
                                         /* write section of the recorded line, trimming indentation */
                                         size_t trim_start = line_start + idx_off;
                                         fwrite(&ma_buf[trim_start], sizeof(char), idx - trim_start, dest);
+                                        fputc('\n', dest);
                                     }
                                     /* increment to character after newline */
                                     ++idx;
@@ -556,6 +674,7 @@ static bool process(FILE* source, FILE* dest) {
                         /* decrease indent level */
                         else {
                             --b;
+                            goto cpy_char;
                         }
                         break;
                     case ' ':
@@ -563,19 +682,14 @@ static bool process(FILE* source, FILE* dest) {
                     case '\n':
                         /* ignore spacing that immediately follows the first '{' */
                         if (b_a) {
-                            /* check for overflow */
-                            if (c == ma_size) {
-                                ma_size *= 2;
-                                ma_buf = realloc(ma_buf, ma_size);
-                            }
-                            ma_buf[c] = buf[t];
-                            ++c;
+                            goto cpy_char;
                         }
                         /* if there's a newline, stop ignoring spacing for the following lines */
                         if (buf[t] == '\n') {
                             b_a = true;
                         }
                         break;
+                    cpy_char:
                     default:
                         /* check for overflow */
                         if (c == ma_size) {
@@ -590,21 +704,19 @@ static bool process(FILE* source, FILE* dest) {
                     }
                     break;
                 case PARSE_MEMBER: /* parsing a declaration or definition */
-                    
-                    /* detect overflow */
-                    if (b == 255) {
-                        PARSE_ERR("member declaration too large [max: 255 characters]");
-                        return false;
-                    }
-                    /* copy character to m_buf */
-                    m_buf[b] = buf[t];
-                    ++b;
-                    
                     switch (buf[t]) {
                     case ';':
                         /* write everything up to this point */
+                        
+                        /* write header prefix */
+                        if (prefix != NULL && *prefix != '\0') {
+                            fputs(prefix, dest);
+                            fputc(' ', dest);
+                        }
                         fwrite(m_buf, sizeof(char), b, dest);
+                        fputs(";\n", dest);
                         parse_mode = false;
+                        PARSE_INFO("end of member");
                         break;
                     case '=':
                     case '{':
@@ -623,13 +735,23 @@ static bool process(FILE* source, FILE* dest) {
                             /* write header prefix */
                             if (prefix != NULL && *prefix != '\0') {
                                 fputs(prefix, dest);
-                                fputs(" ", dest);
+                                fputc(' ', dest);
                             }
                             /* write declaration to header */
-                            fwrite(m_buf, sizeof(char), b - offset, dest);
-                            fputs("\n", dest);
+                            fwrite(m_buf, sizeof(char), (b + 1) - offset, dest);
+                            fputc('\n', dest);
+                            parse_mode = false;
+                            PARSE_INFO("end of member");
                             break;
                         }
+                    default:
+                        /* detect overflow */
+                        if (b == 512) {
+                            PARSE_ERR("member declaration too large [max: 512 characters]");
+                            return false;
+                        }
+                        m_buf[b] = buf[t];
+                        ++b;
                     }
                     break;
                 }
@@ -638,8 +760,18 @@ static bool process(FILE* source, FILE* dest) {
                 if (!parse_mode) {
                     prefix = set_prefix_buf;
                     prefix_set = false;
+                    copying = true;
                 }
             }
+            
+            /* if the character is a newline, mark the next read index as the first in a new line */
+            line_start = buf[t] == '\n';
+
+            /* if stripping, copy characters over */
+            if (copying && strip && !skip_char) {
+                fputc(buf[t], dest);
+            }
+            skip_char = false;
         }
     }
     if (ma_buf != NULL) {
@@ -655,6 +787,7 @@ static bool process(FILE* source, FILE* dest) {
 
 /* local to process and strip functions */
 #undef PARSE_ERR
+#undef PARSE_INFO
 
 #define FOPEN_CHECK(V) ERRNO_CHECK("error when attempting to open file", V)
 
@@ -667,7 +800,7 @@ static bool handle_open(char* source, char* dest) {
     FOPEN_CHECK(source);
     FILE* fdest = fopen(dest, "w");
     FOPEN_CHECK(dest);
-    bool ret = process(fsource, fdest);
+    bool ret = parse(fsource, fdest, strip_mode);
     fclose(fsource);
     fclose(fdest);
     return ret;
@@ -713,34 +846,62 @@ static void create_parents(char* path) {
 
 /* call handle_open, with the destination path as .h, and create parent directories. */
 static bool handle_extension(char* source, char* dest) {
-    size_t len = strlen(dest), n = 0;
-    int t;
-    for (t = len - 1; t >= 0 && t != SIZE_MAX; t--) {
-        if (dest[t] == '.') {
-            ++n;
-            break;
+    if (!strip_mode) {
+        size_t len = strlen(dest), n = 0;
+        int t;
+        for (t = len - 1; t >= 0 && t != SIZE_MAX; t--) {
+            if (dest[t] == '.') {
+                ++n;
+                break;
+            }
+            /* if there's no extension on the source file for some reason */
+            else if (dest[t] == '/') {
+                n = 0;
+                break;
+            }
+            else ++n;
         }
-        /* if there's no extension on the source file for some reason */
-        else if (dest[t] == '/') {
-            n = 0;
-            break;
-        }
-        else ++n;
+        size_t newlen = (len + 2) - n;
+        char buf[newlen + 1];
+        buf[newlen - 2] = '.';
+        buf[newlen - 1] = 'h';
+        buf[newlen] = '\0';
+        memcpy(buf, dest, len - n);
+        create_parents(buf);
+        return handle_open(source, buf);
     }
-    size_t newlen = (len + 2) - n;
-    char buf[newlen + 1];
-    buf[newlen - 2] = '.';
-    buf[newlen - 1] = 'h';
-    buf[newlen] = '\0';
-    memcpy(buf, dest, len - n);
-    create_parents(buf);
-    return handle_open(source, buf);
+    else {
+        create_parents(dest);
+        return handle_open(source, dest);
+    }
 }
 
 #define REALPATH_CHECK(V) ERRNO_CHECK("error when resolving path", V)
 
 static bool handle_target_set(char** set, size_t nset) {
-    // stub
+    
+    size_t t;
+    for (t = 0; t < nset; ++t) {
+
+        if (verbose_mode) {
+            printf("Handling target from set: %s, idx: %d\n", set[t], (int) t);
+        }
+        
+        FILE* fsource = fopen(set[t], "r");
+        FOPEN_CHECK(set[t]);
+
+        bool ret;
+
+        if (pipe_mode) {
+            ret = parse(fsource, stdout, strip_mode);
+            puts("\n");
+        }
+        //TODO: handle other cases
+        
+        fclose(fsource);
+        if (!ret) break;
+    }
+    // finish
     return false;
 }
 
@@ -801,7 +962,7 @@ static bool handle_target(char* buf) {
     else if (pipe_mode) {
         FILE* fsource = fopen(buf, "r");
         FOPEN_CHECK(buf);
-        bool ret = process(fsource, stdout);
+        bool ret = parse(fsource, stdout, strip_mode);
         fclose(fsource);
         return ret;
     }
