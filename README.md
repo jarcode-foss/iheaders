@@ -67,7 +67,7 @@ Depending on the editor you are using, you may want to tweak how it parses your 
 
 You could also tweak your editor to treat `@` characters as whitespace. The following snippet will work in Emacs 24:
 
-```Emacs Lisp
+```emacs
 ;; ignore iheader syntax
 (add-hook 'c-initialization-hook
           (lambda () (modify-syntax-entry ?@ "-" c-mode-syntax-table)))
