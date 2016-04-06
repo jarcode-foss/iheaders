@@ -1,10 +1,6 @@
-**notice:** this is a premature repository push, this is not tested nor finished.
-
 #Inline Headers
 
 This is a small program that can take header information that is inlined into your C source files and generate actual headers from them. You can consolidate both your member definitions and declarations in one place, and have blocks of code that would have normally been exposed through the header (type definitions, macros, etc).
-
-Inline Headers (`iheaders`) is a preprocessor, ran before the C preprocessor. It simply generates a header file and can pass itself to a compiler (like GCC) or strip the source of the header information for later compilation. The syntax is very simple:
 
     @(HEADER PREFIX)(SOURCE PREFIX) <definition or declaration>
 
