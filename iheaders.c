@@ -648,6 +648,7 @@ static bool parse(FILE* source, FILE* dest, bool strip) {
                                     ++idx;
                                 }
                             }
+                            fputc('\n', dest);
                             /* end of parsing for this token */
                             parse_mode = false;
                         }
