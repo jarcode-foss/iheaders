@@ -61,10 +61,10 @@ The default behaviour will create a header file in the same location for every i
 
 Depending on the editor you are using, you may want to tweak how it parses your source code. An easy fix would be to change the token from `@` (using the `-t` flag) to a valid member name, and avoiding the use of the `[...]` syntax for prefixes.
 
-You could also tweak your editor to treat `@` characters as whitespace. The following snippet will work in Emacs 24:
+You could also tweak your editor to treat `@` characters as a valid symbol name or whitespace. The following snippet will work in Emacs 24:
 
 ```emacs
 ;; ignore iheader syntax
 (add-hook 'c-initialization-hook
-          (lambda () (modify-syntax-entry ?@ "-" c-mode-syntax-table)))
+          (lambda () (modify-syntax-entry ?@ "_" c-mode-syntax-table)))
 ```
