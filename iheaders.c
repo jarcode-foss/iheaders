@@ -30,6 +30,8 @@
 #include <string.h>
 #include <assert.h>
 
+#include <time.h>
+
 #include <limits.h>
 
 #include <errno.h>
@@ -74,8 +76,7 @@ static const char* help_opts =
     "structure as their corresponding source files.\n"
     "-s, --single-output=PATH\1provide a file header path for all the provided sources\n"
     "-O, --stdout\1pipe the resulting header into stdout instead.\n"
-    "-T, --timestamp-mode\1place timestamps in the generated headers and only re-generate\2"
-    "headers if their corresponding source files have changed.\n"
+    "-G, --include-gaurds\1place include gaurds in the resulting header file(s)\n"
     "-I, --tab-indent=SIZE\1defines the amount of spaces that a tab occupies, affecting how\2"
     "header block (@ { ... } syntax) indentation is copied to\2"
     "the resulting header file. Set to 0 to preserve all\2"
@@ -88,7 +89,7 @@ static const char* help_footer = "\n" /* padding from the option list */
     "a single header, and pipe mode ('-O' option) - similar to single-header mode, except\n"
     "the resulting file is piped to stdout.\n\n";
 
-static const char* opt_str = "hvps:t:d:r:I:OT";
+static const char* opt_str = "hvps:t:d:r:I:OG";
 
 static struct option p_opts[] = {
     {"help", no_argument, 0, 'h'},
@@ -97,7 +98,7 @@ static struct option p_opts[] = {
     {"token", required_argument, 0, 't'},
     {"header-dir", required_argument, 0, 'd'},
     {"root-dir", required_argument, 0, 'r'},
-    {"timestamp-mode", no_argument, 0, 'T'},
+    {"include-gaurds", no_argument, 0, 'G'},
     {"single-output", required_argument, 0, 's'},
     {"tab-indent", required_argument, 0, 'I'},
     {"stdout", no_argument, 0, 'O'},
@@ -118,7 +119,7 @@ static bool handle_target_set(char** set, size_t nset);
 static bool help_mode = false,  /* if true, the help will be displayed and iheaders will exit */
     verbose_mode = false,       /* if true, extra information will be displayed during processing */
     pipe_mode = false,          /* pipe the output will be piped to stdout */
-    timestamp_mode = false,     /* place timestamps in generated header files */
+    gaurd_mode = false,         /* place include gaurds in generated header files */
     merge_mode = false,         /* merge the results into one header */
     strip_mode = false;         /* strip mode, instead of extracting header code */
 
@@ -164,8 +165,8 @@ int main(int argc, char** argv) {
         case 'r':
             root_dir = optarg;
             break;
-        case 'T':
-            timestamp_mode = true;
+        case 'G':
+            gaurd_mode = true;
             break;
         case 's':
             merge_mode = true;
@@ -782,7 +783,14 @@ static bool handle_open(char* source, char* dest) {
     FOPEN_CHECK(source);
     FILE* fdest = fopen(dest, "w");
     FOPEN_CHECK(dest);
+    if (gaurd_mode && !strip_mode) {
+        struct timespec spec;
+        clock_gettime(CLOCK_REALTIME, &spec);
+        fprintf(fdest, "\n#ifndef gen_%d_%ld\n#define gen_%d_%ld\n",
+                (int) spec.tv_sec, spec.tv_nsec, (int) spec.tv_sec, spec.tv_nsec);
+    }
     bool ret = parse(fsource, fdest, strip_mode);
+    if (gaurd_mode && !strip_mode) fputs("\n#endif\n", fdest);
     fclose(fsource);
     fclose(fdest);
     return ret;
@@ -874,6 +882,13 @@ static bool handle_target_set(char** set, size_t nset) {
         FOPEN_CHECK(single_target);
     }
     
+    if (gaurd_mode && !strip_mode) {
+        struct timespec spec;
+        clock_gettime(CLOCK_REALTIME, &spec);
+        fprintf(target, "\n#ifndef gen_%d_%ld\n#define gen_%d_%ld\n",
+                (int) spec.tv_sec, spec.tv_nsec, (int) spec.tv_sec, spec.tv_nsec);
+    }
+    
     size_t t;
     for (t = 0; t < nset; ++t) {
 
@@ -889,6 +904,9 @@ static bool handle_target_set(char** set, size_t nset) {
         
         fclose(fsource);
         if (!ret) break;
+    }
+    if (gaurd_mode && !strip_mode) {
+        fputs("\n#endif\n", target);
     }
     if (close_after) {
         fclose(target);
