@@ -701,7 +701,7 @@ static bool parse(FILE* source, FILE* dest, bool strip) {
                         /* if there's a newline, stop ignoring spacing for the following lines */
                         if (buf[t] == '\n') {
                             if (strip) goto cpy_char; /* edge case: copy all newlines for stripping */
-                            l = line + 1;  /* record next line */
+                            l = line;  /* record next line */
                             b_a = true;
                         }
                         break;
