@@ -1,26 +1,31 @@
 /*
-    Inline Headers is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+     _____      _ _                _   _                _               
+    |_   _|    | (_)              | | | |              | |              
+      | | _ __ | |_ _ __   ___    | |_| | ___  __ _  __| | ___ _ __ ___ 
+      | || '_ \| | | '_ \ / _ \   |  _  |/ _ \/ _` |/ _` |/ _ \ '__/ __|
+     _| || | | | | | | | |  __/   | | | |  __/ (_| | (_| |  __/ |  \__ \
+     \___/_| |_|_|_|_| |_|\___|   \_| |_/\___|\__,_|\__,_|\___|_|  |___/
+     
+     
+  Inline Headers is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+  You should have received a copy of the GNU General Public License
+  along with this program.  If not, see <http://www.gnu.org/licenses/>.
     
-    Copyright (C) 2016 Levi Webb
+  Copyright (C) 2016 Levi Webb
     
- */
-
-/*
   Inline Headers (iheaders) is a program to process C source files with inlined header
   information, generating a corresponding header file and stripping the source file of
   the iheaders syntax for compilation.
- */
+*/
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -43,7 +48,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
-#define IHEADERS_VERSION "1.0"
+#define IHEADERS_VERSION "1.1"
 #define IHEADERS_SIGNATURE                          \
     "Inline Headers (iheaders) " IHEADERS_VERSION   \
     " -- Copyright (C) 2016 Levi Webb"
@@ -300,11 +305,20 @@ static void get_file_desc(FILE* stream, char* fbuf) {
     ERRNO_CHECK("error while reading from stream", fbuf);
 }
 
+static void emit_line(FILE* stream, int line, const char* file) {
+    char lineb[24 + strlen(file)];
+    snprintf(lineb, sizeof(lineb) / sizeof(char), "#line %d \"%s\"\n", line, file);
+    fputs(lineb, stream);
+}
+
 #define PARSE_UNKNOWN 0
 #define PARSE_HEADER_PREFIX 1
 #define PARSE_SOURCE_PREFIX 2
 #define PARSE_BLOCK 3
 #define PARSE_MEMBER 4
+
+#define ALIGN_LINES() \
+    do { if (!strip) { emit_line(dest, l, source_name); } } while (false)
 
 /* local to process and strip functions */
 #define PARSE_ERR(V, ...) fprintf(stderr, "syntax error [%d:%d] - " V "\n", line, col, ##__VA_ARGS__)
@@ -328,12 +342,13 @@ static bool parse(FILE* source, FILE* dest, bool strip) {
       If you can follow the control flow of this function, you are lying.
      */
 
+    char source_name[PATH_MAX];
+    get_file_desc(source, source_name);
+    
     if (verbose_mode) {
-        char dest_buf[PATH_MAX];
-        char source_buf[PATH_MAX];
-        get_file_desc(dest, dest_buf);
-        get_file_desc(source, source_buf);
-        printf("[PARSE] starting parse for %s -> %s\n", source_buf, dest_buf);
+        char dest_name[PATH_MAX];
+        get_file_desc(dest, dest_name);
+        printf("[PARSE] starting parse for %s -> %s\n", source_name, dest_name);
     }
     
     char buf[128];          /* input buffer */
@@ -344,7 +359,8 @@ static bool parse(FILE* source, FILE* dest, bool strip) {
         b_a;                /* multi-purpose flag */
     size_t t,               /* index in 'buf' */
         token_size = strlen(token),
-        a, b, c;               /* multi-purpose variables (usually indexes) used while parsing */
+        a, b, c,               /* multi-purpose variables (usually indexes) used while parsing */
+        l;                     /* recorded line position for emitting #line directives */
     
     uint8_t parse_mode_flag = 0;   /* while parsing a token, this is set to the parse state */
     char m_buf[512];               /* multi-purpose buffer */
@@ -360,6 +376,16 @@ static bool parse(FILE* source, FILE* dest, bool strip) {
     char* sprefix = set_source_buf; /* pointer to which source prefix buffer to use */
 
     bool copying = true, skip_char = false;
+
+    /* emit #line directive */
+    if (strip) {
+        /*
+          Due to how stripping works, line breaks are placed where
+          iheader syntax originally was in the destination stream,
+          so all we have to do is place a single #line directive.
+         */
+        emit_line(dest, 1, source_name);
+    } /* for non-strip parse scenarios, we add the directives while parsing */
     
     int line = 1, col = 1;
     size_t read_chars, token_read_idx = 0;
@@ -468,8 +494,9 @@ static bool parse(FILE* source, FILE* dest, bool strip) {
                             b = 1;
                             /* copy over the first character */
                             m_buf[0] = buf[t];
-                        
+                            
                             parse_mode_flag = PARSE_MEMBER;
+                            l = line;
                         }
                         else { /* we don't need to read into the declaration to strip it */
                             
@@ -556,17 +583,20 @@ static bool parse(FILE* source, FILE* dest, bool strip) {
                         /* increase indentation level */
                         ++b;
                         /* flag that character has followed the first '{' */
-                        b_a = true;
+                        if (!b_a) {
+                            l = line;
+                            b_a = true;
+                        }
                         goto cpy_char;
                     case '}':
                         /* closing indentation, end of block -- write everything to the header */
                         if (b == 0) {
                             
                             PARSE_INFO("end of header block");
-
+                            
                             /* if we're stripping, just ignore the entire block */
                             if (strip) {
-
+                                
                                 /* copy newlines from the block, to keep spacing */
                                 size_t idx;
                                 for (idx = 0; idx < c; ++idx) {
@@ -612,6 +642,7 @@ static bool parse(FILE* source, FILE* dest, bool strip) {
                                     }
                                 }
                             }
+                            ALIGN_LINES();
                             /* copy to header */
                             if (least_num_spaces == 0) { /* we don't need to trim indentation */
                                 fwrite(ma_buf, sizeof(char), c, dest);
@@ -669,6 +700,7 @@ static bool parse(FILE* source, FILE* dest, bool strip) {
                         /* if there's a newline, stop ignoring spacing for the following lines */
                         if (buf[t] == '\n') {
                             if (strip) goto cpy_char; /* edge case: copy all newlines for stripping */
+                            l = line + 1;  /* record next line */
                             b_a = true;
                         }
                         break;
@@ -683,14 +715,18 @@ static bool parse(FILE* source, FILE* dest, bool strip) {
                         ma_buf[c] = buf[t];
                         ++c;
                         /* start copying whitespace */
-                        b_a = true;
+                        if (!b_a) {
+                            l = line;  /* record line */
+                            b_a = true;
+                        }
                     }
                     break;
                 case PARSE_MEMBER: /* parsing a declaration or definition */
                     switch (buf[t]) {
                     case ';':
                         /* write everything up to this point */
-                        
+
+                        ALIGN_LINES();
                         /* write header prefix */
                         if (prefix != NULL && *prefix != '\0') {
                             fputs(prefix, dest);
@@ -715,6 +751,8 @@ static bool parse(FILE* source, FILE* dest, bool strip) {
                                 else break;
                             }
                             m_buf[b - offset] = ';';
+
+                            ALIGN_LINES();
                             /* write header prefix */
                             if (prefix != NULL && *prefix != '\0') {
                                 fputs(prefix, dest);
@@ -749,7 +787,7 @@ static bool parse(FILE* source, FILE* dest, bool strip) {
             
             /* if the character is a newline, mark the next read index as the first in a new line */
             line_start = buf[t] == '\n';
-
+            
             /* if stripping, copy characters over */
             if (copying && strip && !skip_char) {
                 fputc(buf[t], dest);
@@ -771,6 +809,8 @@ static bool parse(FILE* source, FILE* dest, bool strip) {
 /* local to process and strip functions */
 #undef PARSE_ERR
 #undef PARSE_INFO
+
+#undef ALIGN_LINES
 
 #define FOPEN_CHECK(V) ERRNO_CHECK("error when attempting to open file", V)
 
