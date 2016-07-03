@@ -301,7 +301,8 @@ static void get_file_desc(FILE* stream, char* fbuf) {
     }
     char pbuf[PATH_MAX];
     snprintf(pbuf, PATH_MAX, "/proc/self/fd/%d", fd);
-    readlink(pbuf, fbuf, PATH_MAX);
+    ssize_t t = readlink(pbuf, fbuf, PATH_MAX);
+    fbuf[t] = '\0';
     ERRNO_CHECK("error while reading from stream", fbuf);
 }
 
