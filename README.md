@@ -43,6 +43,29 @@ You can also expose an entire block to the header if the `@` token is immediatel
 }
 ```
 
+A recent addition provides a fix for issues with combining GCC's `__attribute__` syntax and iheader prefixes, resulting in the generated code:
+
+```C
+/* source: */
+@(__attribute__((noinline)) void foo(int a, char b) { ... }
+/* generated header: */
+__attribute__((noinline)) void foo(int a, char b);
+```
+
+While the above works, it can be confusing when trying to apply attributes to the function's return type, so the below style is generally preferred:
+
+```C
+void foo(int a, char b) __attribute__((noinline));
+```
+
+Because `iheaders` only allows for the insertion of prefixes, you could not automate this without the use of a separate `@ { ... }` block. However, you can now use the following syntax:
+
+```C
+@(:noinline,pure:) void foo(int a, char b);
+```
+
+Anything inside of the two colons, separated by commas, is generated just before the semicolon in the resulting header file.
+
 ##Usage
 
 (see `iheaders --help` for a full list of options)

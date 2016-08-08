@@ -776,19 +776,25 @@ static bool parse(FILE* source, FILE* dest, bool strip) {
                         /* inline function, GCC extension */
                         void emit_attrs(void) {
                             if (using_attrs) {
-                                bool will_return = false;
+                                fputs(" __attribute__((", dest);
+                                bool will_return = false, first = true;
                                 char* ac, * attr_start = ma_buf;
                                 for (ac = ma_buf; ac < ma_buf + ma_size; ++ac) {
                                     switch (*ac) {
                                     case '\0':
                                         will_return = true;
                                     case '\1':
-                                        fprintf(dest, " __attribute__((__%.*s__))",
+                                        if (!first) {
+                                            fputs(", ", dest);
+                                        } else first = false;
+                                        fprintf(dest, "%.*s",
                                                 (int) (ac - attr_start), attr_start);
-                                        if (will_return) return;
+                                        if (will_return) goto exit;
                                         attr_start = ac + 1;
                                     }
                                 }
+                            exit:
+                                fputs("))", dest);
                             }
                         }
                         
