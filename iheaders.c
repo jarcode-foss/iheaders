@@ -1,12 +1,4 @@
-/*
-     _____      _ _                _   _                _               
-    |_   _|    | (_)              | | | |              | |              
-      | | _ __ | |_ _ __   ___    | |_| | ___  __ _  __| | ___ _ __ ___ 
-      | || '_ \| | | '_ \ / _ \   |  _  |/ _ \/ _` |/ _` |/ _ \ '__/ __|
-     _| || | | | | | | | |  __/   | | | |  __/ (_| | (_| |  __/ |  \__ \
-     \___/_| |_|_|_|_| |_|\___|   \_| |_/\___|\__,_|\__,_|\___|_|  |___/
-     
-     
+/*   
   Inline Headers is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 3 of the License, or
@@ -352,20 +344,21 @@ static bool parse(FILE* source, FILE* dest, bool strip) {
         printf("[PARSE] starting parse for %s -> %s\n", source_name, dest_name);
     }
     
-    char buf[128];          /* input buffer */
-    bool line_start = true, /* while searching for a token, this is set to true if the index
+    char buf[128];           /* input buffer */
+    bool line_start = true,  /* while searching for a token, this is set to true if the index
                                is the start of a line */
-        parse_mode = false, /* true if a token is being parsed, false if searching for token */
-        prefix_set = false, /* if the header prefix was already set for a token */
-        b_a;                /* multi-purpose flag */
-    size_t t,               /* index in 'buf' */
+        parse_mode = false,  /* true if a token is being parsed, false if searching for token */
+        prefix_set = false,  /* if the header prefix was already set for a token */
+        using_attrs = false, /* if ma_buf (allocated buffer) is being used for attributes */
+        b_a;                 /* multi-purpose flags */
+    size_t t,                /* index in 'buf' */
         token_size = strlen(token),
-        a, b, c,               /* multi-purpose variables (usually indexes) used while parsing */
-        l;                     /* recorded line position for emitting #line directives */
+        a, b, c,             /* multi-purpose variables (usually indexes) used while parsing */
+        l;                   /* recorded line position for emitting #line directives */
     
     uint8_t parse_mode_flag = 0;   /* while parsing a token, this is set to the parse state */
     char m_buf[512];               /* multi-purpose buffer */
-    char* ma_buf = NULL;           /* multi-purpose allocated buffer, used to store header blocks */
+    char* ma_buf = NULL;           /* multi-purpose allocated buffer, used to store header and attr blocks */
     size_t ma_size = 0;
     char set_prefix_buf[128];      /* the universal header prefix for this source file */
     char set_source_buf[128];      /* the universal source prefix for this source file */
@@ -529,24 +522,80 @@ static bool parse(FILE* source, FILE* dest, bool strip) {
                         if (a > 0) {
                             goto copy_pre;
                         }
-                    end_pre:
-                        /* end of prefix, copy if it was the first set (header prefix) */
-                        if (parse_mode_flag == PARSE_HEADER_PREFIX) {
-                            /* copy contents to buffer */
-                            memcpy(prefix_buf, m_buf, b);
-                            prefix_buf[b] = '\0';
-                            /* set prefix to the per-token buffers */
-                            prefix = prefix_buf;
-                            PARSE_INFO("copied header prefix '%s'", prefix_buf);
+                    end_pre:;
+                        const bool is_header = parse_mode_flag == PARSE_HEADER_PREFIX;
+                        char* obuf = (is_header ? prefix_buf : source_buf),
+                            * m_buf_ptr = m_buf;
+
+                        /* parse out :attr,...: syntax */
+
+                        if (strip || !is_header)
+                            goto after_parse;
+                        
+                        if (ma_buf != NULL) {
+                            free(ma_buf);
+                            ma_size = 0;
+                            ma_buf = NULL;
                         }
-                        else {
-                            memcpy(source_buf, m_buf, b);
-                            source_buf[b] = '\0';
-                            sprefix = source_buf;
-                            PARSE_INFO("copied source prefix '%s'", source_buf);
+                        
+                        char* pc, * last_pc;
+                        bool parsing_attribute = false, even = true;
+                        for (pc = m_buf; pc < m_buf + b; ++pc) {
+                            char ac = *pc;
+                            if (parsing_attribute) {
+                                switch (ac) {
+                                case '\0':
+                                    break;
+                                case ':':
+                                    even = true;
+                                    m_buf_ptr = pc + 1;
+                                case ',':
+                                    /* append to ma_buf, split on \1, terminated on \0 */
+                                    if (last_pc != pc) {
+                                        
+                                        size_t l = (pc - last_pc) * sizeof(char) + 1;
+                                        if (ma_buf == NULL) ma_buf = malloc(l);
+                                        else ma_buf = realloc(ma_buf, l + ma_size);
+                                        
+                                        if (ma_size > 0) /* overwrite last \0 to \1 */
+                                            ma_buf[ma_size - 1] = '\1';
+
+                                        /* copy over attribute to the end of the buffer */
+                                        memcpy(ma_buf + ma_size, last_pc, l - 1);
+                                        /* update buffer size */
+                                        ma_size += l;
+                                        /* null-terminate */
+                                        ma_buf[ma_size - 1] = '\0';
+                                        
+                                        PARSE_INFO("appended '%.*s' to ma_buf for __attribute__",
+                                                   (int) (l - 1), last_pc);
+                                    }
+                                    if (even) goto after_parse;
+                                    last_pc = pc + 1;
+                                    break;
+                                }
+                            } else if (ac == ':') {
+                                even = false;
+                                parsing_attribute = true;
+                                last_pc = pc + 1;
+                                continue;
+                            }
                         }
+
+                        if (!even)
+                            PARSE_ERR("expected ':' before end of header prefix while parsing attribute");
+                        
+                    after_parse:
+                        using_attrs = ma_buf != NULL;
+                        /* copy over data from m_buf */
+                        size_t nb = b - (m_buf_ptr - m_buf);
+                        memcpy(obuf, m_buf_ptr, nb);
+                        obuf[nb] = '\0';
+                        *(is_header ? &prefix : &sprefix) = obuf;
+                        PARSE_INFO("copied %s prefix '%s'", (is_header ? "header" : "source"), obuf);
                         parse_mode_flag = PARSE_UNKNOWN;
                         break;
+                        
                     case '(':
                         /* if parsing (...), track levels */
                         if (a > 0) {
@@ -723,35 +772,29 @@ static bool parse(FILE* source, FILE* dest, bool strip) {
                     }
                     break;
                 case PARSE_MEMBER: /* parsing a declaration or definition */
-                    switch (buf[t]) {
-                    case ';':
-                        /* write everything up to this point */
-
-                        ALIGN_LINES();
-                        /* write header prefix */
-                        if (prefix != NULL && *prefix != '\0') {
-                            fputs(prefix, dest);
-                            fputc(' ', dest);
-                        }
-                        fwrite(m_buf, sizeof(char), b, dest);
-                        fputs(";\n", dest);
-                        parse_mode = false;
-                        PARSE_INFO("end of member");
-                        break;
-                    case '=':
-                    case '{':
-                        {
-                            /* find spacing before '{' or '=', remove it, and add semicolon */
-                            size_t offset = 0;
-                            int idx;
-                            for (idx = b - 1; idx >= 0; idx--) {
-                                char at = m_buf[idx];
-                                if (at == ' ' || at == '\t' || at == '\n') {
-                                    ++offset;
+                    {
+                        /* inline function, GCC extension */
+                        void emit_attrs(void) {
+                            if (using_attrs) {
+                                bool will_return = false;
+                                char* ac, * attr_start = ma_buf;
+                                for (ac = ma_buf; ac < ma_buf + ma_size; ++ac) {
+                                    switch (*ac) {
+                                    case '\0':
+                                        will_return = true;
+                                    case '\1':
+                                        fprintf(dest, " __attribute__((__%.*s__))",
+                                                (int) (ac - attr_start), attr_start);
+                                        if (will_return) return;
+                                        attr_start = ac + 1;
+                                    }
                                 }
-                                else break;
                             }
-                            m_buf[b - offset] = ';';
+                        }
+                        
+                        switch (buf[t]) {
+                        case ';':
+                            /* write everything up to this point */
 
                             ALIGN_LINES();
                             /* write header prefix */
@@ -759,23 +802,56 @@ static bool parse(FILE* source, FILE* dest, bool strip) {
                                 fputs(prefix, dest);
                                 fputc(' ', dest);
                             }
-                            /* write declaration to header */
-                            fwrite(m_buf, sizeof(char), (b + 1) - offset, dest);
-                            fputc('\n', dest);
+                            fwrite(m_buf, sizeof(char), b, dest);
+
+                            emit_attrs();
+                        
+                            fputs(";\n", dest);
                             parse_mode = false;
                             PARSE_INFO("end of member");
                             break;
+                        case '{':
+                        case '=':
+                            {
+                                
+                                /* trim spacing before '{' or '=' */
+                                size_t offset = 0;
+                                int idx;
+                                for (idx = b - 1; idx >= 0; idx--) {
+                                    char at = m_buf[idx];
+                                    if (at == ' ' || at == '\t' || at == '\n') {
+                                        ++offset;
+                                    }
+                                    else break;
+                                }
+
+                                ALIGN_LINES();
+                                /* write header prefix */
+                                if (prefix != NULL && *prefix != '\0') {
+                                    fputs(prefix, dest);
+                                    fputc(' ', dest);
+                                }
+                                /* write declaration to header */
+                                fwrite(m_buf, sizeof(char), b - offset, dest);
+                                
+                                emit_attrs();
+                                
+                                fputs(";\n", dest);
+                                parse_mode = false;
+                                PARSE_INFO("end of member");
+                                break;
+                            }
+                        default:
+                            /* detect overflow */
+                            if (b == 512) {
+                                PARSE_ERR("member declaration too large [max: 512 characters]");
+                                return false;
+                            }
+                            m_buf[b] = buf[t];
+                            ++b;
                         }
-                    default:
-                        /* detect overflow */
-                        if (b == 512) {
-                            PARSE_ERR("member declaration too large [max: 512 characters]");
-                            return false;
-                        }
-                        m_buf[b] = buf[t];
-                        ++b;
+                        break;
                     }
-                    break;
                 }
                 
                 /* cleanup after exiting parse mode for a token */
