@@ -549,6 +549,8 @@ static bool parse(FILE* source, FILE* dest, bool strip) {
                                 case ':':
                                     even = true;
                                     m_buf_ptr = pc + 1;
+                                    /* ignore following spaces */
+                                    while (*m_buf_ptr == ' ') ++m_buf_ptr;
                                 case ',':
                                     /* append to ma_buf, split on \1, terminated on \0 */
                                     if (last_pc != pc) {
@@ -560,6 +562,12 @@ static bool parse(FILE* source, FILE* dest, bool strip) {
                                         if (ma_size > 0) /* overwrite last \0 to \1 */
                                             ma_buf[ma_size - 1] = '\1';
 
+                                        /* trim attribute (mind the cryptic code) */
+                                        size_t n_bspaces = 0, n_aspaces = 0;
+                                        for (; *last_pc == ' '; ++n_bspaces) ++last_pc;
+                                        while (last_pc[l - (2 + n_bspaces)] == ' ') ++n_bspaces;
+                                        l -= n_bspaces + n_aspaces;
+                                        
                                         /* copy over attribute to the end of the buffer */
                                         memcpy(ma_buf + ma_size, last_pc, l - 1);
                                         /* update buffer size */
@@ -680,15 +688,15 @@ static bool parse(FILE* source, FILE* dest, bool strip) {
                                         }
                                     }
                                     else if (ma_buf[idx] == '\n') {
-                                    advance: {
-                                            /* record the amount of spacing */
-                                            if (least_num_spaces > num_spaces || measure_start) {
-                                                least_num_spaces = num_spaces;
-                                                measure_start = false;
-                                            }
-                                            num_spaces = 0;
-                                            reading_start = true;
+                                    advance:
+                                        /* record the amount of spacing */
+                                        if (!reading_start && (least_num_spaces > num_spaces
+                                                               || measure_start)) {
+                                            least_num_spaces = num_spaces;
+                                            measure_start = false;
                                         }
+                                        num_spaces = 0;
+                                        reading_start = true;
                                     }
                                 }
                             }
