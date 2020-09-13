@@ -354,7 +354,7 @@ static bool parse(FILE* source, FILE* dest, bool strip) {
     size_t t,                /* index in 'buf' */
         token_size = strlen(token),
         a, b, c,             /* multi-purpose variables (usually indexes) used while parsing */
-        l;                   /* recorded line position for emitting #line directives */
+        l = 0;               /* recorded line position for emitting #line directives */
     
     uint8_t parse_mode_flag = 0;   /* while parsing a token, this is set to the parse state */
     char m_buf[512];               /* multi-purpose buffer */
@@ -1085,17 +1085,17 @@ static bool handle_target(char* buf) {
         realpath(header_dir, target_path);
         REALPATH_CHECK(header_dir);
         
-        size_t n = 0, len = strlen(real_path);
-        int t;
-        for (t = len - 1; t >= 0; t--) {
+        size_t n = 0, len = strlen(real_path), t;
+        for (t = 0; t < len; ++t) {
             if (real_path[t] == '/') {
-                n = t + 1;
+                n = t;
             }
-            else break;
         }
+        printf("rp: %s, tp: %s, idx: %d\n", real_path, target_path, (int) n);
         size_t first_size = strlen(target_path);
         memcpy(&target_path[first_size], &real_path[n], len - n);
         target_path[first_size + (len - n)] = '\0';
+        printf("rp: %s, tp: %s\n", real_path, target_path);
         return handle_extension(real_path, target_path);
     }
     /* pipe the resulting header to stdout */
