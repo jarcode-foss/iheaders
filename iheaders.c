@@ -40,10 +40,10 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
-#define IHEADERS_VERSION "1.1"
+#define IHEADERS_VERSION "1.2"
 #define IHEADERS_SIGNATURE                          \
     "Inline Headers (iheaders) " IHEADERS_VERSION   \
-    " -- Copyright (C) 2016 Levi Webb"
+    " -- Copyright (C) 2016-2020 Levi Webb"
 
 #define HELP_OPT_TAB 4
 #define HELP_OPT_PARAGRAPH_INDENT 2
@@ -74,6 +74,8 @@ static const char* help_opts =
     "-s, --single-output=PATH\1provide a file header path for all the provided sources\n"
     "-O, --stdout\1pipe the resulting header into stdout instead.\n"
     "-G, --include-gaurds\1place include gaurds in the resulting header file(s)\n"
+    "-P, --file-prefix\1sets the prefix used for all output files\n"
+    "-S, --file-suffix\1sets the suffix used for all output files, before the extension\n"
     "-I, --tab-indent=SIZE\1defines the amount of spaces that a tab occupies, affecting how\2"
     "header block (@ { ... } syntax) indentation is copied to\2"
     "the resulting header file. Set to 0 to preserve all\2"
@@ -86,7 +88,7 @@ static const char* help_footer = "\n" /* padding from the option list */
     "a single header, and pipe mode ('-O' option) - similar to single-header mode, except\n"
     "the resulting file is piped to stdout.\n\n";
 
-static const char* opt_str = "hvps:t:d:r:I:OG";
+static const char* opt_str = "hvps:t:d:r:I:OGP:S:";
 
 static struct option p_opts[] = {
     {"help", no_argument, 0, 'h'},
@@ -97,6 +99,8 @@ static struct option p_opts[] = {
     {"root-dir", required_argument, 0, 'r'},
     {"include-gaurds", no_argument, 0, 'G'},
     {"single-output", required_argument, 0, 's'},
+    {"file-prefix", required_argument, 0, 'P'},
+    {"file-suffix", required_argument, 0, 'S'},
     {"tab-indent", required_argument, 0, 'I'},
     {"stdout", no_argument, 0, 'O'},
     {0, 0, 0, 0}
@@ -115,15 +119,17 @@ static bool handle_target_set(char** set, size_t nset);
 
 static bool help_mode = false,  /* if true, the help will be displayed and iheaders will exit */
     verbose_mode = false,       /* if true, extra information will be displayed during processing */
-    pipe_mode = false,          /* pipe the output will be piped to stdout */
-    gaurd_mode = false,         /* place include gaurds in generated header files */
-    merge_mode = false,         /* merge the results into one header */
-    strip_mode = false;         /* strip mode, instead of extracting header code */
+    pipe_mode    = false,       /* pipe the output will be piped to stdout */
+    gaurd_mode   = false,       /* place include gaurds in generated header files */
+    merge_mode   = false,       /* merge the results into one header */
+    strip_mode   = false;       /* strip mode, instead of extracting header code */
 
 static const char* token = "@", /* token to use in processing */
-    * header_dir = NULL,        /* output header directory */
-    * root_dir = NULL,          /* root source directory */
-    * single_target = NULL;     /* single output header file */
+    * header_dir    = NULL,     /* output header directory */
+    * root_dir      = NULL,     /* root source directory */
+    * single_target = NULL,     /* single output header file */
+    * target_prefix = "",
+    * target_suffix = "";
 
 static size_t indent_tab_size = 4;
 
@@ -168,6 +174,12 @@ int main(int argc, char** argv) {
         case 's':
             merge_mode = true;
             single_target = optarg;
+            break;
+        case 'P':
+            target_prefix = optarg;
+            break;
+        case 'S':
+            target_suffix = optarg;
             break;
         case 'I':
             indent_tab_size = atoi(optarg);
@@ -967,34 +979,33 @@ static void create_parents(char* path) {
 
 /* call handle_open, with the destination path as .h, and create parent directories. */
 static bool handle_extension(char* source, char* dest) {
-    if (!strip_mode) {
-        size_t len = strlen(dest), n = 0;
-        int t;
-        for (t = len - 1; t >= 0 && t != SIZE_MAX; t--) {
+    size_t len = strlen(dest), n = 0, s = 0;
+    int t;
+    bool ext_found = false;
+    for (t = len - 1; t >= 0; t--) {
+        if (!ext_found) {
             if (dest[t] == '.') {
                 ++n;
-                break;
+                ext_found = true;
             }
             /* if there's no extension on the source file for some reason */
             else if (dest[t] == '/') {
                 n = 0;
-                break;
             }
             else ++n;
         }
-        size_t newlen = (len + 2) - n;
-        char buf[newlen + 1];
-        buf[newlen - 2] = '.';
-        buf[newlen - 1] = 'h';
-        buf[newlen] = '\0';
-        memcpy(buf, dest, len - n);
-        create_parents(buf);
-        return handle_open(source, buf);
+        if (dest[t] == '/') {
+            s = t + 1;
+            break;
+        }
     }
-    else {
-        create_parents(dest);
-        return handle_open(source, dest);
-    }
+    char buf[PATH_MAX];
+    snprintf(buf, PATH_MAX, "%.*s%s%.*s%s.%c", (int) s, dest,
+             target_prefix, (int) ((len - s) - n), dest + s,
+             target_suffix, strip_mode ? 'c' : 'h');
+    buf[PATH_MAX - 1] = '\0';
+    create_parents(buf);
+    return handle_open(source, buf);
 }
 
 #define REALPATH_CHECK(V) ERRNO_CHECK("error when resolving path", V)
@@ -1091,11 +1102,9 @@ static bool handle_target(char* buf) {
                 n = t;
             }
         }
-        printf("rp: %s, tp: %s, idx: %d\n", real_path, target_path, (int) n);
         size_t first_size = strlen(target_path);
         memcpy(&target_path[first_size], &real_path[n], len - n);
         target_path[first_size + (len - n)] = '\0';
-        printf("rp: %s, tp: %s\n", real_path, target_path);
         return handle_extension(real_path, target_path);
     }
     /* pipe the resulting header to stdout */
