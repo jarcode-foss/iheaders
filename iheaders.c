@@ -1223,7 +1223,7 @@ static bool handle_open(char* source, char* dest) {
             while ((i = fread(buf, 1, sizeof(buf), fdest)) > 0)
                 sha256_update(&ctx, buf, i);
             sha256_finish(&ctx, old_digest);
-        
+            
             fseek(fdest, 0, SEEK_SET); /* reset FILE* index */
         }
         
@@ -1236,13 +1236,14 @@ static bool handle_open(char* source, char* dest) {
     }
     
     bool ret = parse(fsource, fdest, strip_mode);
+
+    if (!strip_mode && gaurd_mode)
+        fputs("\n#endif\n", fdest);
+    
+    fflush(fdest);
+    ftruncate(fddest, ftell(fdest));
     
     if (!strip_mode) {
-        if (gaurd_mode)
-            fputs("\n#endif\n", fdest);
-        
-        fflush(fdest);
-        ftruncate(fddest, ftell(fdest));
         
         if (!skip_checksum) {
             fseek(fdest, gaurd_mode ? 66 : 0, SEEK_SET); /* reset FILE* index */
