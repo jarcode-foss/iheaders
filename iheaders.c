@@ -1357,10 +1357,14 @@ static bool handle_extension(char* source, char* dest) {
     return handle_open(source, buf);
 }
 
-#define REALPATH_CHECK(V) ERRNO_CHECK("error when resolving path", V)
+#define realpath_checked(P, B)                               \
+    ({                                                       \
+        __auto_type _P = P;                                  \
+        if (realpath(_P, B) == NULL)                         \
+            ERRNO_CHECK("error when resolving path", _P);    \
+    })
 
 static bool handle_target_set(char** set, size_t nset) {
-
     FILE* target = NULL;
     bool close_after = true;
 
@@ -1409,14 +1413,11 @@ static bool handle_target(char* buf) {
     /* mimic the source folder structure in the header directory with the generated header */
     if (header_dir && root_dir) {
         char real_path[PATH_MAX];
-        realpath(buf, real_path);
-        REALPATH_CHECK(buf);
+        realpath_checked(buf, real_path);
         char real_root_dir[PATH_MAX];
-        realpath(root_dir, real_root_dir);
-        REALPATH_CHECK(root_dir);
+        realpath_checked(root_dir, real_root_dir);
         char real_header_dir[PATH_MAX];
-        realpath(header_dir, real_header_dir);
-        REALPATH_CHECK(header_dir);
+        realpath_checked(header_dir, real_header_dir);
         size_t root_len = strlen(real_root_dir);
         size_t path_len = strlen(real_path);
         if (strncmp(real_path, real_root_dir, root_len) == 0) {
@@ -1439,11 +1440,9 @@ static bool handle_target(char* buf) {
     /* just plop the generated header into the header directory, no folders */
     else if (header_dir) {
         char real_path[PATH_MAX];
-        realpath(buf, real_path);
-        REALPATH_CHECK(buf);
+        realpath_checked(buf, real_path);
         char target_path[PATH_MAX];
-        realpath(header_dir, target_path);
-        REALPATH_CHECK(header_dir);
+        realpath_checked(header_dir, target_path);
         
         size_t n = 0, len = strlen(real_path), t;
         for (t = 0; t < len; ++t) {
@@ -1467,8 +1466,7 @@ static bool handle_target(char* buf) {
     /* create or overwrite a header file in the same location as the source file */
     else {
         char real_path[PATH_MAX];
-        realpath(buf, real_path);
-        REALPATH_CHECK(buf);
+        realpath_checked(buf, real_path);
         return handle_extension(real_path, real_path);
     }
     return false;
